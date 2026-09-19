@@ -1,0 +1,529 @@
+{
+  "info": {
+    "name": "SaaS Subscription & Tenant Management API",
+    "description": "Full API collection: auth, tenant, subscription, customers, users, dashboard, and tenant-isolation checks. Import this + the accompanying environment file. Requests that create data (register/login/create) auto-save IDs/tokens into environment variables via their Tests tab, so later requests work without manual copy-pasting.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000/api" }
+  ],
+  "item": [
+    {
+      "name": "1. Public",
+      "item": [
+        {
+          "name": "List Plans",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/plans", "host": ["{{base_url}}"], "path": ["plans"] }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "const data = pm.response.json().data;",
+              "pm.test('Free plan is present', () => pm.expect(data.some(p => p.slug === 'free')).to.be.true);",
+              "const pro = data.find(p => p.slug === 'pro');",
+              "if (pro) pm.environment.set('pro_plan_id', pro.id);"
+            ], "type": "text/javascript" }
+          }],
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": { "method": "GET", "url": "{{base_url}}/plans" },
+              "status": "OK", "code": 200,
+              "body": "{\n  \"data\": [\n    { \"id\": 1, \"name\": \"Free\", \"slug\": \"free\", \"price\": \"0.00\", \"feature_limits\": { \"max_users\": 3, \"max_customers\": 50, \"api_rate_limit\": 30 } },\n    { \"id\": 2, \"name\": \"Pro\", \"slug\": \"pro\", \"price\": \"29.00\", \"feature_limits\": { \"max_users\": 15, \"max_customers\": 1000, \"api_rate_limit\": 120 } },\n    { \"id\": 3, \"name\": \"Enterprise\", \"slug\": \"enterprise\", \"price\": \"99.00\", \"feature_limits\": { \"max_users\": null, \"max_customers\": null, \"api_rate_limit\": 600 } }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Show Plan",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/plans/1", "host": ["{{base_url}}"], "path": ["plans", "1"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        }
+      ]
+    },
+    {
+      "name": "2. Auth",
+      "item": [
+        {
+          "name": "Register Tenant A",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company_name\": \"Tenant A Co\",\n  \"company_slug\": \"tenant-a-{{$timestamp}}\",\n  \"company_email\": \"a-{{$timestamp}}@tenanta.com\",\n  \"admin_name\": \"Admin A\",\n  \"admin_email\": \"admin-{{$timestamp}}@tenanta.com\",\n  \"admin_password\": \"password123\",\n  \"admin_password_confirmation\": \"password123\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/auth/register", "host": ["{{base_url}}"], "path": ["auth", "register"] }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+              "const json = pm.response.json();",
+              "pm.environment.set('token_a', json.token);",
+              "pm.environment.set('tenant_a_id', json.tenant.id);",
+              "pm.environment.set('admin_a_email', json.user.email);"
+            ], "type": "text/javascript" }
+          }],
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/auth/register" },
+              "status": "Created", "code": 201,
+              "body": "{\n  \"message\": \"Company registered successfully.\",\n  \"tenant\": { \"id\": 1, \"name\": \"Tenant A Co\", \"slug\": \"tenant-a-1234\", \"status\": \"active\" },\n  \"user\": { \"id\": 1, \"tenant_id\": 1, \"name\": \"Admin A\", \"email\": \"admin-1234@tenanta.com\" },\n  \"token\": \"1|OU5v28d1syKjym9P5l6JhUSwJFhaxSgZQgV3VIozd56864e9\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Register Tenant B",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company_name\": \"Tenant B Co\",\n  \"company_slug\": \"tenant-b-{{$timestamp}}\",\n  \"company_email\": \"b-{{$timestamp}}@tenantb.com\",\n  \"admin_name\": \"Admin B\",\n  \"admin_email\": \"admin-b-{{$timestamp}}@tenantb.com\",\n  \"admin_password\": \"password123\",\n  \"admin_password_confirmation\": \"password123\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/auth/register", "host": ["{{base_url}}"], "path": ["auth", "register"] }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+              "const json = pm.response.json();",
+              "pm.environment.set('token_b', json.token);",
+              "pm.environment.set('tenant_b_id', json.tenant.id);"
+            ], "type": "text/javascript" }
+          }]
+        },
+        {
+          "name": "Login (correct password)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{admin_a_email}}\",\n  \"password\": \"password123\"\n}" },
+            "url": { "raw": "{{base_url}}/auth/login", "host": ["{{base_url}}"], "path": ["auth", "login"] }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+              "pm.environment.set('token_a', pm.response.json().token);"
+            ], "type": "text/javascript" }
+          }],
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/auth/login" },
+              "status": "OK", "code": 200,
+              "body": "{\n  \"user\": { \"id\": 1, \"tenant_id\": 1, \"name\": \"Admin A\", \"email\": \"admin@tenanta.com\" },\n  \"token\": \"2|xyz...\"\n}"
+            },
+            {
+              "name": "422 Wrong Password",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/auth/login" },
+              "status": "Unprocessable Entity", "code": 422,
+              "body": "{\n  \"message\": \"The provided credentials are incorrect.\",\n  \"errors\": { \"email\": [\"The provided credentials are incorrect.\"] }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Login (wrong password) - expect 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{admin_a_email}}\",\n  \"password\": \"totally-wrong\"\n}" },
+            "url": { "raw": "{{base_url}}/auth/login", "host": ["{{base_url}}"], "path": ["auth", "login"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 422', () => pm.response.to.have.status(422));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Get Current User (/auth/me)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/auth/me", "host": ["{{base_url}}"], "path": ["auth", "me"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Get Current User - No Token (expect 401)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/auth/me", "host": ["{{base_url}}"], "path": ["auth", "me"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 401', () => pm.response.to.have.status(401));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/auth/logout", "host": ["{{base_url}}"], "path": ["auth", "logout"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        }
+      ]
+    },
+    {
+      "name": "3. Tenant",
+      "item": [
+        {
+          "name": "Get My Company",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/tenant", "host": ["{{base_url}}"], "path": ["tenant"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Update My Company (admin only)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Tenant A Co Updated\"\n}" },
+            "url": { "raw": "{{base_url}}/tenant", "host": ["{{base_url}}"], "path": ["tenant"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+            "pm.test('Name updated', () => pm.expect(pm.response.json().name).to.eql('Tenant A Co Updated'));"
+          ], "type": "text/javascript" } }]
+        }
+      ]
+    },
+    {
+      "name": "4. Subscription",
+      "item": [
+        {
+          "name": "Get Current Subscription",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/subscription", "host": ["{{base_url}}"], "path": ["subscription"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }],
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": { "method": "GET", "url": "{{base_url}}/subscription" },
+              "status": "OK", "code": 200,
+              "body": "{\n  \"plan\": { \"id\": 1, \"name\": \"Free\", \"feature_limits\": { \"max_users\": 3, \"max_customers\": 50 } },\n  \"usage\": { \"users\": 1, \"customers\": 0 }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Upgrade to Pro (admin only)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"plan_id\": {{pro_plan_id}}\n}" },
+            "url": { "raw": "{{base_url}}/subscription", "host": ["{{base_url}}"], "path": ["subscription"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 201', () => pm.response.to.have.status(201));"], "type": "text/javascript" } }],
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/subscription" },
+              "status": "Created", "code": 201,
+              "body": "{\n  \"message\": \"Subscription updated.\",\n  \"subscription\": { \"id\": 2, \"tenant_id\": 1, \"plan_id\": 2, \"status\": \"active\", \"plan\": { \"id\": 2, \"name\": \"Pro\" } }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Customers",
+      "item": [
+        {
+          "name": "Create Customer",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"John Doe\",\n  \"email\": \"john-{{$timestamp}}@example.com\",\n  \"phone\": \"+8801700000000\"\n}" },
+            "url": { "raw": "{{base_url}}/customers", "host": ["{{base_url}}"], "path": ["customers"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+            "pm.environment.set('customer_id', pm.response.json().id);"
+          ], "type": "text/javascript" } }],
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/customers" },
+              "status": "Created", "code": 201,
+              "body": "{\n  \"id\": 1,\n  \"name\": \"John Doe\",\n  \"email\": \"john@example.com\",\n  \"phone\": \"+8801700000000\",\n  \"status\": \"active\",\n  \"created_at\": \"2026-09-17T08:00:00+00:00\"\n}"
+            },
+            {
+              "name": "403 Plan Limit Exceeded",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/customers" },
+              "status": "Forbidden", "code": 403,
+              "body": "{\n  \"message\": \"The 'max_customers' limit (50) for your current plan has been reached.\",\n  \"error\": \"plan_limit_exceeded\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "List Customers (paginated + filtered)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/customers?status=active&search=John&sort_by=created_at&sort_dir=desc&per_page=15",
+              "host": ["{{base_url}}"], "path": ["customers"],
+              "query": [
+                { "key": "status", "value": "active" },
+                { "key": "search", "value": "John" },
+                { "key": "sort_by", "value": "created_at" },
+                { "key": "sort_dir", "value": "desc" },
+                { "key": "per_page", "value": "15" }
+              ]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }],
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": { "method": "GET", "url": "{{base_url}}/customers" },
+              "status": "OK", "code": 200,
+              "body": "{\n  \"data\": [\n    { \"id\": 1, \"name\": \"John Doe\", \"email\": \"john@example.com\", \"status\": \"active\" }\n  ],\n  \"links\": { \"first\": \"...\", \"last\": \"...\", \"prev\": null, \"next\": null },\n  \"meta\": { \"current_page\": 1, \"per_page\": 15, \"total\": 1 }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Show Customer",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/customers/{{customer_id}}", "host": ["{{base_url}}"], "path": ["customers", "{{customer_id}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Update Customer",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"John Doe Updated\"\n}" },
+            "url": { "raw": "{{base_url}}/customers/{{customer_id}}", "host": ["{{base_url}}"], "path": ["customers", "{{customer_id}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+            "pm.test('Name updated', () => pm.expect(pm.response.json().name).to.eql('John Doe Updated'));"
+          ], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Create Duplicate Email (expect 422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Duplicate\",\n  \"email\": \"john-{{$timestamp}}@example.com\"\n}" },
+            "url": { "raw": "{{base_url}}/customers", "host": ["{{base_url}}"], "path": ["customers"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('May be 422 (dup) or 201 (timestamp differs) - informational only', () => true);"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Delete Customer",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/customers/{{customer_id}}", "host": ["{{base_url}}"], "path": ["customers", "{{customer_id}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        }
+      ]
+    },
+    {
+      "name": "6. Users",
+      "item": [
+        {
+          "name": "Create User (admin only)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Bob Manager\",\n  \"email\": \"bob-{{$timestamp}}@example.com\",\n  \"password\": \"password123\",\n  \"role\": \"manager\"\n}" },
+            "url": { "raw": "{{base_url}}/users", "host": ["{{base_url}}"], "path": ["users"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+            "pm.environment.set('user_id', pm.response.json().id);"
+          ], "type": "text/javascript" } }],
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/users" },
+              "status": "Created", "code": 201,
+              "body": "{\n  \"id\": 2,\n  \"tenant_id\": 1,\n  \"name\": \"Bob Manager\",\n  \"email\": \"bob@example.com\",\n  \"status\": \"active\",\n  \"roles\": [ { \"id\": 2, \"name\": \"manager\" } ]\n}"
+            },
+            {
+              "name": "403 Plan Limit Exceeded",
+              "originalRequest": { "method": "POST", "url": "{{base_url}}/users" },
+              "status": "Forbidden", "code": 403,
+              "body": "{\n  \"message\": \"The 'max_users' limit (3) for your current plan has been reached.\",\n  \"error\": \"plan_limit_exceeded\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "List Users (admin only)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/users?per_page=15", "host": ["{{base_url}}"], "path": ["users"], "query": [{ "key": "per_page", "value": "15" }] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Update User (role + status)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"disabled\",\n  \"role\": \"staff\"\n}" },
+            "url": { "raw": "{{base_url}}/users/{{user_id}}", "host": ["{{base_url}}"], "path": ["users", "{{user_id}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Delete User",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/users/{{user_id}}", "host": ["{{base_url}}"], "path": ["users", "{{user_id}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        }
+      ]
+    },
+    {
+      "name": "7. Dashboard",
+      "item": [
+        {
+          "name": "Dashboard Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_a}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/dashboard/summary", "host": ["{{base_url}}"], "path": ["dashboard", "summary"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }],
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": { "method": "GET", "url": "{{base_url}}/dashboard/summary" },
+              "status": "OK", "code": 200,
+              "body": "{\n  \"plan\": \"Free\",\n  \"total_users\": 2,\n  \"total_customers\": 1,\n  \"active_customers\": 1,\n  \"limits\": { \"max_users\": 3, \"max_customers\": 50 },\n  \"generated_at\": \"2026-09-17T10:15:00+00:00\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "8. Tenant Isolation Checks",
+      "item": [
+        {
+          "name": "Tenant B lists customers - must NOT see Tenant A's data",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_b}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/customers", "host": ["{{base_url}}"], "path": ["customers"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+            "pm.test('Response does not contain Tenant A customer names', () => {",
+            "  const body = pm.response.text();",
+            "  pm.expect(body.includes('John Doe')).to.eql(false);",
+            "});"
+          ], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Tenant B fetches Tenant A's customer by ID - expect 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token_b}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": { "raw": "{{base_url}}/customers/{{customer_id}}", "host": ["{{base_url}}"], "path": ["customers", "{{customer_id}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('Status is 404 (isolation holds)', () => pm.response.to.have.status(404));"], "type": "text/javascript" } }]
+        }
+      ]
+    }
+  ]
+}

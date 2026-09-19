@@ -1,0 +1,121 @@
+services:
+    app:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: saas_app
+        working_dir: /var/www
+        volumes:
+            - ./:/var/www
+        restart: unless-stopped
+        networks:
+            - saas_network
+        depends_on:
+            mysql:
+                condition: service_healthy
+            redis:
+                condition: service_started
+
+    queue:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: saas_queue
+        working_dir: /var/www
+        command: php artisan queue:work redis --sleep=3 --tries=3
+        volumes:
+            - ./:/var/www
+        restart: unless-stopped
+        networks:
+            - saas_network
+        depends_on:
+            mysql:
+                condition: service_healthy
+            redis:
+                condition: service_started
+
+    scheduler:
+        build:
+            context: .
+            dockerfile: docker/php/Dockerfile
+        container_name: saas_scheduler
+        working_dir: /var/www
+        command: sh -c "while true; do php artisan schedule:run; sleep 60; done"
+        volumes:
+            - ./:/var/www
+        restart: unless-stopped
+        networks:
+            - saas_network
+        depends_on:
+            mysql:
+                condition: service_healthy
+            redis:
+                condition: service_started
+
+    nginx:
+        image: nginx:1.27-alpine
+        container_name: saas_nginx
+        ports:
+            - "8000:80"
+        volumes:
+            - ./:/var/www
+            - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+        restart: unless-stopped
+        networks:
+            - saas_network
+        depends_on:
+            - app
+
+    mysql:
+        image: mysql:8.0
+        container_name: saas_mysql
+        restart: unless-stopped
+        environment:
+            MYSQL_DATABASE: saas_api
+            MYSQL_USER: saas_user
+            MYSQL_PASSWORD: saas_password
+            MYSQL_ROOT_PASSWORD: root_password
+        # Host port changed to 3307 to avoid clashing with a MySQL already
+        # running on the host machine's default 3306. The app container talks
+        # to MySQL via the internal service name "mysql:3306" regardless — this
+        # port is only for connecting a DB GUI tool from your host machine.
+        ports:
+            - "3307:3306"
+        volumes:
+            - mysql_data:/var/lib/mysql
+        networks:
+            - saas_network
+        healthcheck:
+            test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+            interval: 5s
+            timeout: 5s
+            retries: 10
+
+    redis:
+        image: redis:7-alpine
+        container_name: saas_redis
+        # Same reasoning as MySQL above: host port bumped to 6380 in case a
+        # local Redis is already using 6379. Internal traffic uses "redis:6379".
+        ports:
+            - "6380:6379"
+        restart: unless-stopped
+        networks:
+            - saas_network
+
+    adminer:
+        image: adminer:latest
+        container_name: saas_adminer
+        restart: unless-stopped
+        ports:
+            - "8081:8080"
+        networks:
+            - saas_network
+        depends_on:
+            - mysql
+
+networks:
+    saas_network:
+        driver: bridge
+
+volumes:
+    mysql_data:
