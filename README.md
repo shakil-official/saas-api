@@ -1,284 +1,601 @@
 # SaaS Subscription & Tenant Management API
 
-A multi-tenant SaaS backend built with Laravel 11: companies (tenants), users,
-role-based permissions, subscription plans with feature limits, customers,
-dashboard analytics, Redis caching, and background jobs.
+A production-style **multi-tenant SaaS backend** built with Laravel 11 —
+companies (tenants), users, role-based permissions, subscription plans with
+feature limits, customers, Redis caching, background jobs, and a fully
+tenant-isolated REST API.
+
+This single file covers: setup, architecture, the complete API reference
+(payload → response for every endpoint), the Postman collection, the full
+request workflow, caching/indexing strategy, and known gaps.
 
 ---
 
-## 1. Setup Instructions
+## Table of Contents
+1. [Tech Stack](#1-tech-stack)
+2. [Setup Instructions (Docker)](#2-setup-instructions-docker)
+3. [Postman Collection](#3-postman-collection)
+4. [Project Structure](#4-project-structure)
+5. [Multi-Tenancy Architecture](#5-multi-tenancy-architecture)
+6. [Database Schema & Indexing](#6-database-schema--indexing)
+7. [Caching Strategy & Invalidation](#7-caching-strategy--invalidation)
+8. [Background Jobs](#8-background-jobs)
+9. [Full API Reference (payload → response)](#9-full-api-reference-payload--response)
+10. [Full Request Workflow](#10-full-request-workflow-step-by-step)
+11. [System Design Decisions](#11-system-design-decisions)
+12. [Running Tests](#12-running-tests)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Known Gaps / Still To Add](#14-known-gaps--still-to-add)
 
-### Requirements
-- Docker & Docker Compose (recommended), **or** PHP 8.2+, Composer, MySQL 8, Redis locally.
+---
 
-### Quick start (Docker)
+## 1. Tech Stack
+
+| Layer | Choice |
+|---|---|
+| Framework | Laravel 11 (PHP 8.2) |
+| Auth | Laravel Sanctum (token-based) |
+| Roles/Permissions | Spatie Laravel Permission (guard: `api`) |
+| Database | MySQL 8 |
+| Cache / Queue | Redis 7 (via Predis) |
+| Web server | Nginx (php-fpm behind it) |
+| Containerization | Docker Compose (app, queue, scheduler, nginx, mysql, redis, adminer) |
+| Tests | PHPUnit |
+
+---
+
+## 2. Setup Instructions (Docker)
+
+### Prerequisites
+- Docker + Docker Compose installed
+- Port `8000` (API), `3307` (MySQL, remapped to avoid clashing with a local
+  MySQL on `3306`), `6380` (Redis, remapped from `6379`), and `8081`
+  (Adminer) free on your host
+
+### Step-by-step
+
 ```bash
+# 1. Extract the project and enter it
+cd saas-api
+
+# 2. Copy the environment file
 cp .env.example .env
+
+# 3. Build and start every container (app, queue, scheduler, nginx, mysql, redis, adminer)
 docker-compose up -d --build
-docker-compose exec app composer install
+
+# 4. Generate the app encryption key
 docker-compose exec app php artisan key:generate
+
+# 5. Run migrations AND seed reference data (roles, plans) — both are required
 docker-compose exec app php artisan migrate --seed
 ```
-API is now available at `http://localhost:8000/api`.
 
-### Without Docker
+**`--seed` is not optional.** Without it, `roles`/`permissions` and `plans`
+tables are empty, and registration will fail with
+`"There is no role named 'admin' for guard 'api'"`, and `GET /plans` will
+return an empty list. If you ever run `migrate:fresh` (which wipes all
+tables), you must re-seed:
 ```bash
-cp .env.example .env
-# edit .env: point DB_HOST/REDIS_HOST to localhost
-composer install
-php artisan key:generate
-php artisan migrate --seed
-php artisan serve
-php artisan queue:work redis   # in a second terminal
+docker-compose exec app php artisan migrate:fresh --seed
 ```
 
-### Running tests
+### Verify it's working
 ```bash
-docker-compose exec app php artisan test
-# or: php artisan test
+curl http://localhost:8000/api/plans
 ```
+Should return the seeded **Free / Pro / Enterprise** plans. If you get
+`{"data":[]}`, the seed step above did not run — re-run it.
 
-### Seeded data
-- Roles: `admin`, `manager`, `staff` (Spatie permission, guard `api`)
-- Plans: `Free` (3 users / 50 customers), `Pro` (15 users / 1000 customers), `Enterprise` (unlimited)
-
-### Try it
+### If you built the project via `install.sh` (scaffolding a fresh Laravel skeleton)
+`install.sh` is only needed if you're assembling this repo's custom `app/`,
+`database/`, `routes/` code onto a fresh `laravel new` skeleton (this
+sandbox couldn't reach Packagist to do that step itself). Run it once, with
+internet access, from the project root:
 ```bash
-curl -X POST http://localhost:8000/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "company_name": "Acme Inc",
-    "company_slug": "acme",
-    "company_email": "hello@acme.com",
-    "admin_name": "Alice Admin",
-    "admin_email": "alice@acme.com",
-    "admin_password": "password123",
-    "admin_password_confirmation": "password123"
-  }'
+chmod +x install.sh
+./install.sh
 ```
-See `docs/API.md` for the full endpoint reference with sample requests/responses.
+It scaffolds Laravel, merges in the custom code, and installs Composer
+packages (Sanctum, Spatie Permission, Swagger, Predis). If you were handed
+a project that already has a working `vendor/` folder, **skip this
+entirely** and go straight to the Docker steps above.
 
----
-
-## 2. Database Schema & Multi-Tenant Architecture
-
-### Approach chosen: **Single database, shared tables, `tenant_id` discriminator column**
-
-Compared against the three common multi-tenancy strategies:
-
-| Strategy | Isolation | Ops overhead | Cost at scale | Chosen? |
-|---|---|---|---|---|
-| Database-per-tenant | Strongest | High (migrations run N times, connection pooling gets hard) | Expensive past a few hundred tenants | No |
-| Schema-per-tenant | Strong | Medium (Postgres-specific, still N schemas to migrate) | Medium | No |
-| **Shared DB + `tenant_id`** | Enforced in application layer | Low — one schema, one migration path | Scales to tens of thousands of tenants on one DB | **Yes** |
-
-**Why this fits a SaaS management API specifically:** tenants here are companies
-subscribing to a product, not enterprises requiring hard data-residency
-guarantees. A shared-schema design keeps migrations, backups, and connection
-pooling simple, and scales horizontally by sharding on `tenant_id` later if a
-single database ever becomes a bottleneck — without a rewrite.
-
-### How isolation is enforced (not just "by convention")
-1. Every tenant-owned table (`users`, `customers`, `subscriptions`, `usage_logs`)
-   has an indexed `tenant_id` foreign key.
-2. `App\Traits\BelongsToTenant` + `App\Scopes\TenantScope` add a **global Eloquent
-   scope** to every tenant-owned model. A developer would have to *explicitly*
-   opt out (`withoutTenantScope()`) to leak cross-tenant data — the safe path
-   is the default path, not something you have to remember.
-3. `App\Http\Middleware\IdentifyTenant` resolves the tenant from the
-   authenticated user on every request and binds it into the container before
-   any controller code runs.
-4. Route-model binding (`Route::apiResource('customers', ...)`) combined with
-   the global scope means requesting another tenant's resource by ID returns
-   `404`, not `403` — it doesn't even reveal the record exists (see
-   `TenantIsolationTest`).
-
-### Core tables
-```
-tenants          — company/organization record
-users            — tenant_id nullable FK; platform login accounts; unique(tenant_id, email)
-plans            — global, not tenant-scoped; JSON feature_limits
-subscriptions    — tenant_id + plan_id; one "active" row per tenant at a time
-customers        — tenant's own customers; unique(tenant_id, email)
-usage_logs       — daily metrics per tenant, for analytics/growth reporting
-roles/permissions — Spatie package tables, guard "api"
+### Permission issues (`storage/framework/views: Permission denied`)
+The Docker image's entrypoint script (`docker/php/entrypoint.sh`) fixes
+`storage/` and `bootstrap/cache/` ownership on every container start. If
+you still hit a permission error (e.g. after manually editing files as
+root on the host):
+```bash
+docker-compose exec app chmod -R 775 storage bootstrap/cache
+docker-compose exec app chown -R www-data:www-data storage bootstrap/cache
 ```
 
-Full column-level definitions are in `database/migrations/`.
+### Seeded reference data
+| Roles (guard `api`) | Plans |
+|---|---|
+| `admin`, `manager`, `staff` | `Free` (3 users / 50 customers), `Pro` (15 / 1000), `Enterprise` (unlimited) |
+
+### Adminer (DB browser)
+Open `http://localhost:8081`. Server field: **`mysql`** (the Docker service
+name — not `127.0.0.1`, since Adminer runs inside the same Docker network).
+Username `saas_user`, password `saas_password`, database `saas_api`.
+
+### Auto-restart after a PC reboot
+Every service has `restart: unless-stopped`. If Docker Desktop is set to
+launch on login, all containers come back up automatically — no manual
+`docker-compose up` needed, unless you previously ran `docker-compose down`
+(which removes containers entirely; in that case, run `up -d` once more,
+`--build` is not needed unless the Dockerfile changed).
 
 ---
 
-## 3. Caching Strategy & Invalidation
+## 3. Postman Collection
 
-Redis is used for two distinct purposes, deliberately kept separate:
+Two files, both required:
+- `docs/postman/SaaS-Subscription-API.postman_collection.json`
+- `docs/postman/SaaS-API-Local.postman_environment.json`
 
-- **`CACHE_STORE=redis`** — response/query caching (this section)
-- **`QUEUE_CONNECTION=redis`** — background job queue (section 5)
+### Import
+1. Open Postman → **Import**
+2. Drag both files in together
+3. Top-right environment dropdown → select **"SaaS API - Local"**
 
-### What is cached, and why
+### What's inside
+8 folders, in run order: Public → Auth → Tenant → Subscription → Customers
+→ Users → Dashboard → Tenant Isolation Checks. Every request has a
+**Tests tab** assertion (status code, and key fields) and several have
+**saved example responses** you can view without hitting a live server.
 
-| Cache key | Data | TTL | Reasoning |
-|---|---|---|---|
-| `plans:active` | Active subscription plans | 6h | Global, rarely changes, read on nearly every pricing/limit check |
-| `tenant:{id}:active_plan` | Tenant's current plan + limits | 1h | Read on almost every write operation (limit checks); cheap to recompute but very frequently read |
-| `tenant:{id}:dashboard:summary` | Aggregate counts (users, customers, usage vs. limits) | 5m | Expensive `COUNT()` queries; dashboard doesn't need second-level freshness |
+**Auto-token capture:** running "Register Tenant A" automatically saves
+`{{token_a}}`, `{{tenant_a_id}}`, `{{admin_a_email}}` into the environment
+— every later request in the collection uses these variables, so you never
+manually copy-paste a token.
 
-### Invalidation strategy: **event-driven, not just TTL expiry**
-
-Relying on TTL alone means users can see stale data for up to the TTL window
-after a change. Instead, cache is proactively busted the moment underlying
-data changes, using **Eloquent Observers** (`app/Observers/`):
-
-- `CustomerObserver` → clears `tenant:{id}:dashboard:summary` on create/update/delete.
-- `UserObserver` → clears `tenant:{id}:dashboard:summary` on create/update/delete.
-- `PlanObserver` → clears the global `plans:active` cache on save/delete.
-- `SubscriptionService::subscribe()` explicitly clears `tenant:{id}:active_plan`
-  immediately after changing a tenant's plan (subscription changes are
-  transactional and deliberate, so it's cleared inline rather than via an
-  observer on a rarely-touched table).
-
-This gives cache-hit performance most of the time, with correctness guaranteed
-by invalidation rather than "hope the TTL is short enough." All cache keys are
-**tenant-scoped by construction** (`tenant:{id}:...`), so there is no risk of
-one tenant's cached data leaking into another tenant's response.
-
-### Why not cache the customer list itself?
-Paginated, filtered, sorted list endpoints have too many parameter
-combinations to cache effectively (low hit rate, high invalidation
-complexity) — caching there would add complexity without a real performance
-win. Caching is applied to **aggregates and rarely-changing reference data**,
-where the win is largest and invalidation is tractable.
+**To run the whole thing automatically:** right-click the collection →
+**Run collection** → it executes every request top-to-bottom and reports a
+pass/fail count, equivalent to running `test-full-api.sh`.
 
 ---
 
-## 4. Database Optimization & Indexing
+## 4. Project Structure
 
-| Table | Index | Query it serves |
-|---|---|---|
-| `users` | `unique(tenant_id, email)` | Per-tenant login lookups; also enforces per-tenant uniqueness (not global) |
-| `users` | `index(tenant_id, status)` | "active users for this tenant" — used by limit checks and listings |
-| `customers` | `unique(tenant_id, email)` | Duplicate-customer prevention scoped correctly per tenant |
-| `customers` | `index(tenant_id, created_at)` | Pagination + date-range filtering, sorted by newest first |
-| `subscriptions` | `index(tenant_id, status)` | "get the active subscription for tenant X" |
-| `subscriptions` | `index(status, ends_at)` | The hourly `ExpireSubscriptions` job scans only active, expiring rows — avoids a full table scan as tenants grow |
-| `usage_logs` | `unique(tenant_id, metric, logged_date)` | Upsert-safe daily metric writes; also serves time-series lookups |
-| `tenants` | `unique(slug)` | Subdomain/tenant resolution |
-
-**Query-level decisions:**
-- All list/detail queries rely on the `tenant_id` global scope, which always
-  hits the composite indexes above — there is no unscoped `SELECT *` path.
-- `UserController::index()` eager-loads `roles` (`with('roles')`) to avoid
-  N+1 queries when serializing role names for a paginated list.
-- `SubscriptionController::current()` and `DashboardController::summary()`
-  avoid recomputing counts on every request by going through the cache layer
-  described in section 3 — the index above only matters on a cache miss.
-- Repository classes (`app/Repositories/`) centralize query construction so
-  filtering/sorting logic — and its index usage — lives in one reviewable
-  place instead of being duplicated across controllers.
-
----
-
-## 5. Background Jobs
-
-Queue driver: Redis (`QUEUE_CONNECTION=redis`), run via `queue:work` (see
-`docker-compose.yml`'s `queue` service).
-
-- **`SendTenantWelcomeEmail`** — dispatched after registration. Email delivery
-  is a slow, failure-prone I/O operation with no reason to block the API
-  response; retried up to 3 times with backoff.
-- **`ExpireSubscriptions`** — scheduled hourly (`routes/console.php`). Scans
-  `subscriptions` using the `(status, ends_at)` index, flips expired rows to
-  `status = expired`, and busts the relevant tenant caches. Runs as a job
-  (not an inline scheduled closure) so it benefits from queue retries and
-  doesn't block the scheduler process.
-
----
-
-## 6. Architecture & Design Patterns (SOLID)
-
-- **Repository pattern** (`app/Repositories/`) — used where a resource has
-  non-trivial filtering/sorting/pagination logic worth isolating from the
-  controller (`CustomerRepositoryInterface` / `EloquentCustomerRepository`).
-  Bound via `RepositoryServiceProvider`, satisfying **Dependency Inversion**:
-  controllers depend on the interface, not the Eloquent implementation, so
-  the data layer can be swapped (e.g., for a test double) without touching
-  controller code. Simpler resources (e.g. `Plan`) query the model directly —
-  repositories are added where they earn their complexity, not everywhere.
-- **Service layer** (`app/Services/SubscriptionService.php`) — all
-  subscription/plan-limit business rules live here, independent of HTTP. This
-  is what `SubscriptionServiceTest` (a Unit test) exercises directly, with no
-  HTTP layer involved — a direct benefit of keeping business logic out of
-  controllers (**Single Responsibility**).
-- **Observer pattern** (`app/Observers/`) — decouples "a model changed" from
-  "the cache must be invalidated." Adding a new tenant-affecting model later
-  means adding an observer, not editing existing controllers (**Open/Closed**).
-- **Global Scope + Trait** (`TenantScope` / `BelongsToTenant`) — tenant
-  filtering is cross-cutting behavior applied declaratively to any model that
-  opts in, rather than repeated `where('tenant_id', ...)` calls scattered
-  through the codebase.
-- **Form Requests** (`app/Http/Requests/`) — validation rules are colocated
-  per-action and reusable, keeping controllers free of inline validation
-  logic.
-- **API Resources** (`app/Http/Resources/`) — response shaping is decoupled
-  from the model's raw attributes, so internal columns are never accidentally
-  exposed and the response contract can evolve independently of the schema.
-- **Custom exception + `render()`** (`PlanLimitExceededException`) — business
-  rule violations map to a clean HTTP response without `if/else` branching in
-  every controller that enforces a limit.
-
----
-
-## 7. System Design Notes / Key Decisions
-
-- **Why Sanctum over Passport:** this is a first-party SPA/API client
-  scenario, not a third-party OAuth integration — Sanctum's token model is
-  simpler to operate and sufficient for the stated requirements.
-- **Why email is unique per-tenant, not globally:** two different companies
-  should be able to have an "admin@company.com"-style user without collision.
-  This is a deliberate schema decision (`unique(tenant_id, email)`), not an
-  oversight — covered explicitly by a test in `AuthTest`.
-- **Why rate limits scale with plan tier:** `RouteServiceProvider`'s `api`
-  limiter reads the tenant's current plan's `api_rate_limit` feature, so
-  throttling is itself a monetizable, plan-aware feature rather than a flat
-  global limit — consistent with the "feature limits" requirement.
-  Auth endpoints (`login`, `register`) use separate, stricter, IP-based
-  limiters to slow down credential-stuffing/abuse independent of any tenant.
-- **Where this would go next at real scale:** shard `tenant_id` ranges across
-  read replicas or separate physical databases once a single primary becomes
-  the bottleneck (the schema was deliberately kept shard-friendly from day
-  one — no cross-tenant foreign keys or joins anywhere in the codebase);
-  move `usage_logs` writes off the request path via a queued job if
-  usage-tracking volume grows; add a search-oriented read store (e.g.
-  Elasticsearch) if customer search outgrows indexed `LIKE` queries.
-
----
-
-## 8. Project Structure
 ```
 app/
-  Exceptions/        Custom domain exceptions (PlanLimitExceededException)
+  Exceptions/PlanLimitExceededException.php   Custom exception → HTTP 403
   Http/
-    Controllers/Api/  Thin controllers — orchestration only
-    Middleware/        IdentifyTenant
-    Requests/          Form Request validation classes
-    Resources/         API response shaping
-  Jobs/                Queued background jobs
-  Models/              Eloquent models
-  Observers/           Cache-invalidation side effects
-  Providers/           App/Repository/Route service providers
-  Repositories/        Contracts + Eloquent implementations
-  Scopes/              TenantScope (global scope)
-  Services/            Business logic (SubscriptionService)
-  Traits/              BelongsToTenant
+    Controllers/Api/    Thin controllers (orchestration only)
+    Middleware/          IdentifyTenant.php
+    Requests/            Form Request validation (per-action rules)
+    Resources/           API response shaping (CustomerResource)
+  Jobs/                  SendTenantWelcomeEmail, ExpireSubscriptions
+  Models/                Tenant, User, Plan, Subscription, Customer, UsageLog
+  Observers/             CustomerObserver, UserObserver, PlanObserver (cache busting)
+  Providers/             AppServiceProvider, RouteServiceProvider, RepositoryServiceProvider
+  Repositories/          Contracts/ + Eloquent/ (Customer's filter/sort/paginate logic)
+  Scopes/TenantScope.php Global scope — the core of multi-tenancy
+  Services/SubscriptionService.php   All plan-limit / subscription business logic
+  Traits/BelongsToTenant.php         Applies TenantScope + auto-fills tenant_id
 database/
-  migrations/          Schema, fully indexed
-  seeders/             Roles, permissions, default plans
-  factories/           Test data factories
+  migrations/    Fully indexed schema
+  seeders/       RolePermissionSeeder, PlanSeeder
+  factories/     Test data factories
 docs/
-  API.md               Full endpoint reference
+  API.md, WORKFLOW.md, postman/       (this README supersedes/summarizes both)
 tests/
-  Feature/             HTTP-level tests, incl. tenant isolation
-  Unit/                Service-layer business logic tests
-docker/                Dockerfiles + nginx config
-docker-compose.yml      app, queue, scheduler, nginx, mysql, redis
+  Feature/   AuthTest, TenantIsolationTest, CustomerControllerTest,
+             UserControllerTest, DashboardCacheTest
+  Unit/      SubscriptionServiceTest
+docker/      Dockerfile (with entrypoint.sh permission fix), nginx config
+docker-compose.yml   app, queue, scheduler, nginx, mysql, redis, adminer
+test-full-api.sh              End-to-end bash smoke test (27 checks)
+test-tenant-isolation.sh      Focused tenant-isolation bash test
 ```
+
+---
+
+## 5. Multi-Tenancy Architecture
+
+**Approach: single database, shared tables, `tenant_id` discriminator
+column** (chosen over database-per-tenant or schema-per-tenant — simpler
+migrations/backups, scales to tens of thousands of tenants on one DB, and
+fits a SaaS-subscription API where tenants don't need hard data-residency
+guarantees).
+
+**Enforced in three layers, not just convention:**
+1. Every tenant-owned table has an indexed `tenant_id` FK.
+2. `BelongsToTenant` trait + `TenantScope` global scope — every Eloquent
+   query on `User`, `Customer`, `Subscription` is automatically filtered
+   by `tenant_id`. A developer would have to explicitly call
+   `withoutTenantScope()` to bypass it.
+3. `IdentifyTenant` middleware resolves `tenant_id` from the authenticated
+   user on every request and binds it into the container before any
+   controller runs.
+
+**Route-model-binding hardening:** Laravel's `SubstituteBindings`
+middleware (auto-added to the `api` group) resolves `{customer}`/`{user}`
+route parameters *before* our custom middleware in some priority orderings.
+Two defenses are in place:
+- `bootstrap/app.php` explicitly declares middleware priority
+  (`Authenticate → IdentifyTenant → ThrottleRequests → SubstituteBindings`).
+- `BelongsToTenant::resolveRouteBinding()` independently re-checks the
+  resolved model's `tenant_id` against the authenticated user's tenant,
+  returning `null` (→ Laravel's normal 404) on any mismatch — regardless of
+  middleware ordering.
+
+**Result:** `GET /api/customers/{id}` for a customer belonging to a
+different tenant returns `404`, not `403` — the row is indistinguishable
+from "doesn't exist" to a foreign tenant.
+
+---
+
+## 6. Database Schema & Indexing
+
+```
+tenants          company/organization record
+users            tenant_id nullable FK; unique(tenant_id, email) — email is
+                 unique PER TENANT, not globally
+plans            global (not tenant-scoped); JSON feature_limits column
+subscriptions    tenant_id + plan_id; one "active" row per tenant at a time
+customers        tenant's own customers; unique(tenant_id, email)
+usage_logs       daily metrics per tenant (present in schema; not yet
+                 populated by any job — see section 14)
+roles/permissions  Spatie package tables, guard "api"
+```
+
+| Table | Index | Serves |
+|---|---|---|
+| `users` | `unique(tenant_id, email)` | Per-tenant login lookup + uniqueness |
+| `users` | `index(tenant_id, status)` | Active-user counts for limit checks |
+| `customers` | `unique(tenant_id, email)` | Duplicate prevention, scoped correctly |
+| `customers` | `index(tenant_id, created_at)` | Pagination + date-range filtering |
+| `subscriptions` | `index(tenant_id, status)` | "current subscription for tenant X" |
+| `subscriptions` | `index(status, ends_at)` | Hourly expiry job avoids a full scan |
+| `tenants` | `unique(slug)` | Tenant resolution by slug |
+
+Query-level optimizations: `UserController::index()` eager-loads `roles`
+(`with('roles')`) to avoid N+1; dashboard/plan/subscription reads go
+through the cache layer (section 7) before ever hitting these indexes.
+
+---
+
+## 7. Caching Strategy & Invalidation
+
+| Cache key | TTL | What / Why |
+|---|---|---|
+| `plans:active` | 6h | Global plan list — rarely changes, read on nearly every request |
+| `tenant:{id}:active_plan` | 1h | Read on almost every write (limit checks, rate limiting) |
+| `tenant:{id}:dashboard:summary` | 5m | Expensive `COUNT()` aggregates |
+
+**Invalidation is event-driven, not just TTL expiry:**
+- `CustomerObserver` / `UserObserver` clear `tenant:{id}:dashboard:summary`
+  on create/update/delete (registered in `AppServiceProvider::boot()`).
+- `PlanObserver` clears `plans:active` on any Plan save/delete.
+- `SubscriptionService::subscribe()` clears `tenant:{id}:active_plan`
+  inline immediately after a plan change.
+- `ExpireSubscriptions` job clears both `active_plan` and
+  `dashboard:summary` when a subscription expires.
+
+Proven (not just documented) by `tests/Feature/DashboardCacheTest.php`,
+which asserts the cache key is actually cleared after a mutation.
+
+**Why customer *lists* aren't cached:** too many filter/sort/pagination
+combinations for a good hit rate — caching is applied to aggregates and
+rarely-changing reference data instead, where the win is real.
+
+---
+
+## 8. Background Jobs
+
+Redis-backed queue, processed by the `queue` container
+(`php artisan queue:work redis`); scheduled tasks run via the `scheduler`
+container (`schedule:run` every 60s).
+
+- **`SendTenantWelcomeEmail`** — dispatched after registration so the API
+  response doesn't wait on SMTP. Retries 3x, 30s backoff.
+- **`ExpireSubscriptions`** — hourly (`routes/console.php`). Flips
+  `status → expired` for subscriptions past `ends_at`, using the
+  `(status, ends_at)` index; busts the relevant caches.
+
+---
+
+## 9. Full API Reference (payload → response)
+
+Base URL: `http://localhost:8000/api`. All authenticated requests need
+`Authorization: Bearer {token}` and `Accept: application/json`.
+
+### Public
+
+**`POST /auth/register`**
+```json
+// Request
+{
+  "company_name": "Acme Inc",
+  "company_slug": "acme",
+  "company_email": "hello@acme.com",
+  "admin_name": "Alice Admin",
+  "admin_email": "alice@acme.com",
+  "admin_password": "password123",
+  "admin_password_confirmation": "password123"
+}
+```
+```json
+// 201 Response
+{
+  "message": "Company registered successfully.",
+  "tenant": { "id": 1, "name": "Acme Inc", "slug": "acme", "status": "active" },
+  "user": { "id": 1, "tenant_id": 1, "name": "Alice Admin", "email": "alice@acme.com" },
+  "token": "1|OU5v28d1syKjym9P5l6JhUSwJFhaxSgZQgV3VIozd56864e9"
+}
+```
+Validation failure (duplicate slug/email, weak password) → `422`.
+
+**`POST /auth/login`**
+```json
+// Request
+{ "email": "alice@acme.com", "password": "password123" }
+```
+```json
+// 200 Response
+{ "user": { "id": 1, "tenant_id": 1, "name": "Alice Admin", "email": "alice@acme.com" },
+  "token": "2|xyz..." }
+```
+Wrong password → `422`: `{"message":"The provided credentials are incorrect.","errors":{"email":[...]}}`
+
+**`GET /plans`**
+```json
+// 200 Response (cached 6h)
+{
+  "data": [
+    { "id": 1, "name": "Free", "slug": "free", "price": "0.00",
+      "feature_limits": { "max_users": 3, "max_customers": 50, "api_rate_limit": 30 } },
+    { "id": 2, "name": "Pro", "slug": "pro", "price": "29.00",
+      "feature_limits": { "max_users": 15, "max_customers": 1000, "api_rate_limit": 120 } },
+    { "id": 3, "name": "Enterprise", "slug": "enterprise", "price": "99.00",
+      "feature_limits": { "max_users": null, "max_customers": null, "api_rate_limit": 600 } }
+  ]
+}
+```
+
+**`GET /plans/{id}`** → `200` single plan object, or `404`.
+
+---
+
+### Authenticated — Account
+
+**`GET /auth/me`** → `200`
+```json
+{ "id": 1, "tenant_id": 1, "name": "Alice Admin", "email": "alice@acme.com",
+  "roles": [ { "id": 1, "name": "admin" } ] }
+```
+No/invalid token → `401 {"message":"Unauthenticated."}`
+
+**`POST /auth/logout`** → `200 {"message":"Logged out."}` (revokes the current token)
+
+---
+
+### Authenticated — Tenant
+
+**`GET /tenant`** → `200` — your own company record.
+
+**`PATCH /tenant`** (admin only)
+```json
+// Request
+{ "name": "Acme Incorporated", "settings": { "timezone": "Asia/Dhaka" } }
+```
+→ `200` updated tenant object. Non-admin → `403`.
+
+---
+
+### Authenticated — Subscription
+
+**`GET /subscription`** → `200`
+```json
+{ "plan": { "id": 1, "name": "Free", "feature_limits": {"max_users":3,"max_customers":50} },
+  "usage": { "users": 2, "customers": 17 } }
+```
+
+**`POST /subscription`** (admin only)
+```json
+// Request
+{ "plan_id": 2 }
+```
+```json
+// 201 Response
+{ "message": "Subscription updated.",
+  "subscription": { "id": 5, "tenant_id": 1, "plan_id": 2, "status": "active",
+    "plan": { "id": 2, "name": "Pro" } } }
+```
+
+---
+
+### Authenticated — Customers (any role)
+
+**`GET /customers?status=&search=&from=&to=&sort_by=&sort_dir=&per_page=`**
+```json
+// 200 Response — always includes pagination envelope
+{
+  "data": [ { "id": 1, "name": "John Doe", "email": "john@example.com", "status": "active" } ],
+  "links": { "first": "...", "last": "...", "prev": null, "next": null },
+  "meta": { "current_page": 1, "per_page": 15, "total": 1 }
+}
+```
+
+**`POST /customers`**
+```json
+// Request
+{ "name": "John Doe", "email": "john@example.com", "phone": "+8801700000000" }
+```
+```json
+// 201 Response — flat, not wrapped in "data"
+{ "id": 1, "name": "John Doe", "email": "john@example.com",
+  "phone": "+8801700000000", "status": "active", "created_at": "2026-09-17T08:00:00+00:00" }
+```
+Plan limit reached → `403`:
+```json
+{ "message": "The 'max_customers' limit (50) for your current plan has been reached.",
+  "error": "plan_limit_exceeded" }
+```
+Duplicate email (within same tenant) → `422`.
+
+**`GET /customers/{id}`** → `200` (flat object), or `404` if it belongs to another tenant.
+
+**`PATCH /customers/{id}`** — any subset of `{name, email, phone, status}` → `200` updated object.
+
+**`DELETE /customers/{id}`** → `200 {"message":"Customer deleted."}` (soft-deleted)
+
+---
+
+### Authenticated — Users (admin only)
+
+**`GET /users?per_page=`** → `200` — paginated, roles eager-loaded.
+
+**`POST /users`**
+```json
+// Request
+{ "name": "Bob Manager", "email": "bob@acme.com", "password": "password123", "role": "manager" }
+```
+→ `201` user object with `roles`. Plan `max_users` limit hit → `403 plan_limit_exceeded`.
+Non-admin caller → `403`.
+
+**`PATCH /users/{id}`**
+```json
+// Request
+{ "status": "disabled", "role": "staff" }
+```
+→ `200` updated user.
+
+**`DELETE /users/{id}`** → `200 {"message":"User removed."}`
+
+---
+
+### Authenticated — Dashboard
+
+**`GET /dashboard/summary`** → `200` (cached 5 min, tenant-scoped)
+```json
+{ "plan": "Free", "total_users": 2, "total_customers": 17, "active_customers": 15,
+  "limits": { "max_users": 3, "max_customers": 50 },
+  "generated_at": "2026-09-17T10:15:00+00:00" }
+```
+
+---
+
+### Error format reference
+
+| Status | Meaning | Body shape |
+|---|---|---|
+| 401 | No/invalid token | `{"message":"Unauthenticated."}` |
+| 403 | Wrong role, or plan limit exceeded | `{"message":"...","error":"plan_limit_exceeded"}` for limits; plain message for role checks |
+| 404 | Resource not found (incl. cross-tenant access) | `{"message":"..."}` |
+| 422 | Validation failure | `{"message":"...","errors":{"field":["..."]}}` |
+| 429 | Rate limit exceeded | `{"message":"Too Many Attempts."}` |
+
+### Rate limits
+`/auth/login` 5/min per IP · `/auth/register` 3/min per IP · everything
+else scales with the tenant's plan `api_rate_limit` (Free 30/min, Pro
+120/min, Enterprise 600/min), keyed per authenticated user.
+
+---
+
+## 10. Full Request Workflow (step by step)
+
+Every authenticated request flows through this pipeline:
+```
+Nginx → auth:sanctum (resolve token → User)
+      → identify.tenant (bind tenant_id into the container)
+      → throttle:api (plan-based rate limit)
+      → role:admin (if the route requires it)
+      → SubstituteBindings (resolve {customer}/{user} route params —
+         tenant-checked independently, see section 5)
+      → Controller (thin orchestration)
+      → FormRequest (validation)
+      → Service / Repository (business logic + tenant-scoped queries)
+      → API Resource (response shaping)
+      → JSON response
+```
+
+**Registration workflow:**
+```
+POST /auth/register
+  → DB::transaction {
+      1. Create Tenant
+      2. Create admin User (tenant_id auto-filled by BelongsToTenant)
+      3. assignRole('admin')
+      4. SubscriptionService::subscribe(tenant, freePlan)
+    }  ← all-or-nothing; if any step fails, nothing is committed
+  → SendTenantWelcomeEmail::dispatch()  ← queued, doesn't block the response
+  → Sanctum token issued
+  → 201 response
+```
+
+**Plan-limit enforcement workflow:**
+```
+POST /customers
+  → SubscriptionService::assertWithinLimit(tenant, 'max_customers', fn () => Customer::count())
+  → reads currentPlan() from cache
+  → if limit reached: throws PlanLimitExceededException
+  → exception's own render() method converts it to HTTP 403 automatically
+  → otherwise: Customer::create() proceeds, tenant_id auto-filled,
+    CustomerObserver fires → busts dashboard cache
+```
+
+**Background job workflow:** `queue` container continuously drains Redis's
+job queue (welcome emails); `scheduler` container ticks every 60s and
+triggers `ExpireSubscriptions` once per hour.
+
+---
+
+## 11. System Design Decisions
+
+- **Sanctum over Passport** — first-party API client, not third-party OAuth; simpler to operate.
+- **Email unique per-tenant, not globally** — two companies can each have `admin@company.com` without collision. Verified by `AuthTest::test_two_tenants_can_use_the_same_admin_email_independently`.
+- **Rate limits scale with plan tier** — throttling is itself a monetizable, plan-aware feature, not a flat global limit.
+- **Repository pattern only where it earns its complexity** — `Customer` has non-trivial filter/sort/paginate logic worth isolating; `Plan`/`Tenant` are simple enough to query directly via Eloquent.
+- **At real scale, next steps would be:** shard `tenant_id` ranges across read replicas (schema deliberately has no cross-tenant joins, so this stays feasible); move `usage_logs` writes to a queued job if usage-tracking volume grows; add a search-oriented store if customer search outgrows indexed `LIKE` queries.
+
+---
+
+## 12. Running Tests
+
+```bash
+docker-compose exec app php artisan test
+```
+
+| Test file | Covers |
+|---|---|
+| `AuthTest` | Registration, per-tenant email uniqueness, login failure |
+| `TenantIsolationTest` | Cross-tenant data leak prevention (list + direct-ID access + route-model-binding hardening) |
+| `CustomerControllerTest` | CRUD, duplicate-email validation, plan-limit 403, pagination/search |
+| `UserControllerTest` | RBAC (admin-only), plan-limit 403, role/status updates |
+| `DashboardCacheTest` | Cache actually populates AND actually invalidates (not just documented) |
+| `SubscriptionServiceTest` | Plan-limit business logic in isolation (unit-level) |
+
+Also available: `./test-full-api.sh` (27-step bash smoke test against a
+running server) and `./test-tenant-isolation.sh` (focused isolation check).
+
+---
+
+## 13. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `GET /plans` returns `{"data":[]}` | Seeders never ran: `docker-compose exec app php artisan db:seed` |
+| Registration fails: "no role named admin" | Same as above — roles table is empty |
+| `storage/framework/views: Permission denied` | `docker-compose exec app chmod -R 775 storage bootstrap/cache && chown -R www-data:www-data storage bootstrap/cache` |
+| `Connection refused` on migrate right after `up` | MySQL wasn't ready yet — `docker-compose.yml` now has a healthcheck; wait ~15s and retry |
+| `MissingRateLimiterException` | `bootstrap/providers.php` must list `RouteServiceProvider::class` (Laravel 11 doesn't auto-load it) |
+| 401 on a request you expect to succeed | Check the token hasn't been logged-out / expired |
+| 404 for something you just created | Almost always correct — you're authenticated as a different tenant than the owner |
+| Port conflict (3306/6379 already in use) | This project maps MySQL to host `3307` and Redis to `6380` — use those, not the defaults |
+| `no configuration file provided: not found` | You ran `docker-compose` from the wrong directory — `cd` into the folder with `docker-compose.yml` |
+
+---
+
+## 14. Known Gaps / Still To Add
+
+Honest list — not hidden:
+1. **`usage_logs` table is unused** — schema and model exist, but no job/observer writes to it yet. Either populate it for real trend analytics, or remove it.
+2. **No resource-level Policy classes** — authorization is role-level (`role:admin`) only. A `manager` can edit any customer in their tenant; there's no per-record ownership check.
+3. **No interactive Swagger/OpenAPI UI** — `l5-swagger` is in `composer.json` but has no `@OA` annotations yet. This README + Postman collection are the current documentation.
+4. **Not yet pushed to a GitHub repository** — the assessment asks for a repo link; this has been delivered as a zip so far.
+5. **Tenant `status` (suspended/cancelled) isn't enforced** — the column exists but nothing currently blocks a suspended tenant's users from logging in.
