@@ -132,29 +132,109 @@ launch on login, all containers come back up automatically — no manual
 
 ## 3. Postman Collection
 
-Two files, both required:
-- `docs/postman/SaaS-Subscription-API.postman_collection.json`
-- `docs/postman/SaaS-API-Local.postman_environment.json`
+### File locations (inside this repo)
+```
+docs/postman/SaaS-Subscription-API.postman_collection.json   ← the collection (all requests)
+docs/postman/SaaS-API-Local.postman_environment.json         ← the environment (base_url + variables)
+```
+**Both files are required.** The collection alone will not work — it
+references `{{base_url}}`, `{{token_a}}`, etc., which only exist once the
+environment file is also imported and selected.
 
-### Import
-1. Open Postman → **Import**
-2. Drag both files in together
-3. Top-right environment dropdown → select **"SaaS API - Local"**
+### How to import — step by step
 
-### What's inside
-8 folders, in run order: Public → Auth → Tenant → Subscription → Customers
-→ Users → Dashboard → Tenant Isolation Checks. Every request has a
-**Tests tab** assertion (status code, and key fields) and several have
-**saved example responses** you can view without hitting a live server.
+1. Open the **Postman** desktop app or web app.
+2. Click the **Import** button (top-left corner of the app, or
+   `File → Import` in the menu bar).
+3. A dialog opens with a drag-and-drop area. Either:
+    - Drag **both** JSON files from `docs/postman/` into that area at once, or
+    - Click **"Choose Files"** and select both files (hold Ctrl/Cmd to
+      multi-select) from `docs/postman/`.
+4. Postman will show a preview listing what it detected:
+    - **"SaaS Subscription & Tenant Management API"** → recognized as a *Collection*
+    - **"SaaS API - Local"** → recognized as an *Environment*
+5. Click **Import** to confirm. You'll now see:
+    - The collection in the left sidebar under **Collections**
+    - The environment in the environment list (usually accessed via the
+      dropdown in the top-right corner of the app, or the "Environments"
+      tab in the left sidebar)
+6. **Activate the environment**: click the environment dropdown in the
+   top-right of the Postman window (it says "No Environment" by default)
+   and select **"SaaS API - Local"**. This step is easy to miss — if
+   skipped, every request will fail because `{{base_url}}` won't resolve
+   to anything.
+7. Confirm `base_url` is correct: click the eye icon 👁 next to the
+   environment dropdown to preview its variables. It should show
+   `base_url = http://localhost:8000/api`. If your API runs on a
+   different host/port, edit it here (click the environment name → edit
+   the value → Save).
 
-**Auto-token capture:** running "Register Tenant A" automatically saves
-`{{token_a}}`, `{{tenant_a_id}}`, `{{admin_a_email}}` into the environment
-— every later request in the collection uses these variables, so you never
-manually copy-paste a token.
+### Running requests
 
-**To run the whole thing automatically:** right-click the collection →
-**Run collection** → it executes every request top-to-bottom and reports a
-pass/fail count, equivalent to running `test-full-api.sh`.
+**Option A — one at a time:** open the collection in the sidebar, click
+into a folder (e.g. "2. Auth"), click a request (e.g. "Register Tenant
+A"), then click the blue **Send** button. The response appears in the
+lower panel; the **Test Results** tab next to it shows pass/fail for that
+request's built-in assertions.
+
+**Option B — the whole collection at once:** right-click the collection
+name in the sidebar → **Run collection** (or use the "Runner" button at
+the top of the collection view). This opens the Collection Runner, which
+lets you pick which folders/requests to include (leave everything checked
+for a full run), then click **Run SaaS Subscription & Tenant Management
+API**. It executes every request top-to-bottom in order and shows a
+pass/fail summary — this is the Postman equivalent of running
+`./test-full-api.sh`.
+
+### Recommended run order
+Requests are grouped into 8 folders that are meant to be run **in this
+order** (top to bottom in the sidebar), since later requests depend on
+data/tokens created by earlier ones:
+```
+1. Public                    → no auth needed, sanity-checks the API is up
+2. Auth                      → Register Tenant A, Register Tenant B, Login, Me, Logout
+3. Tenant                    → uses {{token_a}}
+4. Subscription               → uses {{token_a}}
+5. Customers                  → uses {{token_a}}; saves {{customer_id}}
+6. Users                      → uses {{token_a}}; saves {{user_id}}
+7. Dashboard                  → uses {{token_a}}
+8. Tenant Isolation Checks     → uses {{token_b}} against {{customer_id}} created by Tenant A
+```
+
+### Auto-token capture (no manual copy-pasting)
+Running **"Register Tenant A"** (folder 2) automatically saves these into
+the active environment via its Tests script:
+| Variable | Set by |
+|---|---|
+| `{{token_a}}` | Register Tenant A |
+| `{{tenant_a_id}}` | Register Tenant A |
+| `{{admin_a_email}}` | Register Tenant A |
+| `{{token_b}}` | Register Tenant B |
+| `{{tenant_b_id}}` | Register Tenant B |
+| `{{customer_id}}` | Create Customer |
+| `{{user_id}}` | Create User |
+| `{{first_plan_id}}` / `{{pro_plan_id}}` | List Plans |
+
+Every other request in the collection references these variables instead
+of hardcoded values — so as long as you run folder 2 first, everything
+downstream just works.
+
+### What's inside each request
+Every request has a **Tests** tab with assertions (status code, and key
+response fields) that run automatically and show green ✔ / red ✘ in the
+response panel. Several requests (Register, Login, List Plans, Create
+Customer, etc.) also have **saved example responses** — click the small
+dropdown arrow next to the Send button, under "Examples", to view a
+sample response without needing a live server at all.
+
+### Common import issues
+
+| Problem | Fix |
+|---|---|
+| "Could not import" / blank preview | Make sure you selected the `.json` files directly, not a folder |
+| Requests show `{{base_url}}` literally in the URL bar unresolved | The environment isn't selected — check the top-right dropdown |
+| 401 on every request after import | Run "Register Tenant A" or "Login" first to populate `{{token_a}}` |
+| Variables not saving between requests | Confirm you're using the **same environment** for every request (check the dropdown hasn't reset to "No Environment") |
 
 ---
 
